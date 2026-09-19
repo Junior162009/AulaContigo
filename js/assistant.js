@@ -1,41 +1,161 @@
 (() => {
 "use strict";
-const $=s=>document.querySelector(s), messages=$("#messages"), input=$("#message"), send=$("#send"), composer=$("#composer"), clear=$("#clear"), status=$("#status");
-const API="https://text.pollinations.ai/openai", LEGACY="https://text.pollinations.ai/", TIMEOUT=30000, STORE="aulacontigo-history-v2", MAX=10;
-const SYSTEM="Eres AulaContigo, tutor educativo para estudiantes de secundaria. Responde en español con claridad, adapta el nivel, muestra pasos y ejemplos, no inventes datos y pide aclaración si es necesario. Mantén el contexto.";
+
+const $=s=>document.querySelector(s);
+const messages=$("#messages"), input=$("#message"), send=$("#send"), composer=$("#composer"), clear=$("#clear"), status=$("#status");
+
+const API="https://text.pollinations.ai/";
+const FAST_MODEL="openai/gpt-5.4-nano";
+const FALLBACK_MODEL="openai";
+const TIMEOUT=14000;
+const STORE="aulacontigo-history-v4";
+const MAX_HISTORY=6;
+
+const SYSTEM="Eres AulaContigo, tutor escolar. Responde en español, claro y breve. Explica paso a paso solo cuando haga falta. Adapta la respuesta a secundaria. No inventes datos.";
+
 let history=[];
-try{const x=JSON.parse(localStorage.getItem(STORE)||"[]");if(Array.isArray(x))history=x.filter(m=>m&&(m.role==="user"||m.role==="assistant")&&typeof m.content==="string").slice(-MAX)}catch(e){console.warn(e)}
-function save(){try{localStorage.setItem(STORE,JSON.stringify(history.slice(-MAX)))}catch(e){}}
-function statusText(t,c=""){if(status){status.textContent=t;status.className="status"+(c?" "+c:"")}}
-function add(role,text,typing=false){const e=document.createElement("div");e.className="msg "+role+(typing?" typing":"");e.textContent=text;messages.appendChild(e);requestAnimationFrame(()=>messages.scrollTop=messages.scrollHeight);return e}
-function body(q){return{model:"openai",messages:[{role:"system",content:SYSTEM},...history.slice(-MAX),{role:"user",content:q}],temperature:.7,max_tokens:800,stream:false}}
-async function req(url,opt){const c=new AbortController(),t=setTimeout(()=>c.abort(),TIMEOUT);try{return await fetch(url,{...opt,signal:c.signal})}finally{clearTimeout(t)}}
-async function ask(q){
-let r;
-try{r=await req(API,{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify(body(q))})}
-catch(e){
-console.warn("OpenAI endpoint:",e);
-try{r=await req(LEGACY,{method:"POST",headers:{"Content-Type":"application/json","Accept":"text/plain"},body:JSON.stringify({model:"openai",messages:body(q).messages})})}
-catch(e2){console.error("IA network/CORS",e2);throw new Error(e2.name==="AbortError"?"La IA tardó demasiado.":"No se pudo conectar con la IA (red/CORS).")}
+
+try{
+  const saved=JSON.parse(localStorage.getItem(STORE)||"[]");
+  if(Array.isArray(saved)) history=saved
+    .filter(m=>m&&(m.role==="user"||m.role==="assistant")&&typeof m.content==="string")
+    .slice(-MAX_HISTORY);
+}catch(e){}
+
+function save(){
+  try{localStorage.setItem(STORE,JSON.stringify(history.slice(-MAX_HISTORY)))}catch(e){}
 }
-const raw=await r.text(); console.debug("AulaContigo API",r.status,raw.slice(0,400));
-if(!r.ok){if(r.status===401||r.status===403)throw new Error("La API requiere autenticación (HTTP "+r.status+").");if(r.status===429)throw new Error("La API está temporalmente saturada (HTTP 429).");if(r.status>=500)throw new Error("Error temporal del servidor de IA (HTTP "+r.status+").");throw new Error("La API rechazó la solicitud (HTTP "+r.status+").")}
-if(!raw.trim())throw new Error("La IA devolvió una respuesta vacía.");
-try{const d=JSON.parse(raw),a=d?.choices?.[0]?.message?.content||d?.choices?.[0]?.text||d?.output_text||d?.response;if(typeof a==="string"&&a.trim())return a.trim()}catch(e){}
-return raw.trim();
+
+function statusText(t,c=""){
+  if(status){status.textContent=t;status.className="status"+(c?" "+c:"");}
 }
+
+function add(role,text,typing=false){
+  const el=document.createElement("div");
+  el.className="msg "+role+(typing?" typing":"");
+  el.textContent=text;
+  messages.appendChild(el);
+  requestAnimationFrame(()=>messages.scrollTop=messages.scrollHeight);
+  return el;
+}
+
+function makePrompt(question){
+  let context="";
+  if(history.length){
+    context="\nContexto reciente:\n"+history.slice(-MAX_HISTORY)
+      .map(m=>(m.role==="user"?"Alumno: ":"Tutor: ")+m.content)
+      .join("\n");
+  }
+  return SYSTEM+context+"\n\nPregunta: "+question+"\nResponde directamente:";
+}
+
+async function request(url){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),TIMEOUT);
+  try{
+    return await fetch(url,{
+      method:"GET",
+      headers:{Accept:"text/plain"},
+      cache:"no-store",
+      signal:controller.signal
+    });
+  }finally{clearTimeout(timer);}
+}
+
+async function ask(question){
+  const prompt=makePrompt(question);
+
+  // Modelo rápido: menos contexto y generación más ligera para responder antes.
+  for(const model of [FAST_MODEL,FALLBACK_MODEL]){
+    try{
+      const url=API+encodeURIComponent(prompt)+"?model="+encodeURIComponent(model)+"&seed=-1";
+      const response=await request(url);
+      const text=await response.text();
+
+      if(response.ok&&text.trim()) return text.trim();
+
+      // Si hay saturación, cambia inmediatamente al siguiente modelo.
+      if(response.status===429) continue;
+
+      console.warn("IA HTTP",response.status,text.slice(0,200));
+    }catch(error){
+      console.warn("IA intento fallido",model,error);
+      if(error.name==="AbortError") continue;
+    }
+  }
+
+  throw new Error("La IA está ocupada. Intenta nuevamente en unos segundos.");
+}
+
 async function sendMessage(){
-const q=input.value.trim();if(!q||send.disabled)return;
-add("user",q);history.push({role:"user",content:q});save();input.value="";input.style.height="";send.disabled=true;statusText("Consultando al tutor…");
-const thinking=add("assistant","Pensando…",true);
-try{const a=await ask(q);thinking.remove();add("assistant",a);history.push({role:"assistant",content:a});save();statusText("Respuesta recibida.","ok")}
-catch(e){thinking.remove();console.error("AulaContigo:",e);add("assistant","⚠️ "+(e.message||"No pude obtener una respuesta.")+"\n\nPuedes volver a intentarlo.");statusText("No se pudo completar la consulta.","err")}
-finally{send.disabled=false;input.focus()}
+  const question=input.value.trim();
+  if(!question||send.disabled)return;
+
+  // Mostrar el mensaje sin esperar a la API.
+  add("user",question);
+  history.push({role:"user",content:question});
+  save();
+
+  input.value="";
+  input.style.height="";
+  send.disabled=true;
+  statusText("Pensando…");
+
+  const thinking=add("assistant","Pensando…",true);
+
+  try{
+    const answer=await ask(question);
+    thinking.remove();
+    add("assistant",answer);
+    history.push({role:"assistant",content:answer});
+    save();
+    statusText("Respuesta recibida.","ok");
+  }catch(error){
+    thinking.remove();
+    add("assistant","⚠️ "+error.message+"\n\nVuelve a intentarlo.");
+    statusText("La IA está ocupada.","err");
+  }finally{
+    send.disabled=false;
+    input.focus();
+  }
 }
-composer.addEventListener("submit",e=>{e.preventDefault();sendMessage()});
-input.addEventListener("input",()=>{input.style.height="auto";input.style.height=Math.min(input.scrollHeight,150)+"px"});
-input.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage()}});
-document.querySelectorAll("[data-q]").forEach(b=>b.addEventListener("click",()=>{input.value=b.dataset.q||"";sendMessage()}));
-clear.addEventListener("click",()=>{history=[];try{localStorage.removeItem(STORE)}catch(e){}messages.innerHTML="";add("assistant","¡Nueva conversación! 👋 ¿Qué quieres aprender hoy?");statusText("Nueva conversación iniciada.","ok");input.focus()});
-messages.innerHTML="";if(history.length)history.forEach(m=>add(m.role,m.content));else add("assistant","¡Hola! 👋 Soy AulaContigo. Escribe una pregunta y te ayudaré paso a paso.");statusText("Listo para ayudarte.","ok");
+
+composer.addEventListener("submit",e=>{
+  e.preventDefault();
+  sendMessage();
+});
+
+input.addEventListener("input",()=>{
+  input.style.height="auto";
+  input.style.height=Math.min(input.scrollHeight,150)+"px";
+});
+
+input.addEventListener("keydown",e=>{
+  if(e.key==="Enter"&&!e.shiftKey){
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+document.querySelectorAll("[data-q]").forEach(button=>{
+  button.addEventListener("click",()=>{
+    input.value=button.dataset.q||"";
+    sendMessage();
+  });
+});
+
+clear.addEventListener("click",()=>{
+  history=[];
+  try{localStorage.removeItem(STORE)}catch(e){}
+  messages.innerHTML="";
+  add("assistant","¡Nueva conversación! 👋 ¿Qué quieres aprender hoy?");
+  statusText("Nueva conversación iniciada.","ok");
+  input.focus();
+});
+
+messages.innerHTML="";
+if(history.length) history.forEach(m=>add(m.role,m.content));
+else add("assistant","¡Hola! 👋 Soy AulaContigo. Escribe una pregunta y te ayudaré paso a paso.");
+
+statusText("Listo para ayudarte.","ok");
 })();
