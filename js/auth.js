@@ -1,1 +1,54 @@
-const form=document.getElementById("login-form"),status=document.getElementById("login-status"),supabase=window.supabaseClient,button=document.getElementById("login-button");const email=document.getElementById("email"),password=document.getElementById("password");document.getElementById("toggle-password")?.addEventListener("click",()=>{password.type=password.type==="password"?"text":"password"});async function redirectByRole(){const {data:{user}}=await supabase.auth.getUser();if(!user)throw new Error("No se encontró una sesión activa.");const {data:profile,error}=await supabase.from("school_profiles").select("role,full_name,active").eq("auth_user_id",user.id).maybeSingle();if(error)throw error;if(!profile){await supabase.auth.signOut();throw new Error("Tu cuenta fue creada, pero todavía no tiene perfil escolar.");}if(!profile.active){await supabase.auth.signOut();throw new Error("Tu cuenta está pendiente de activación por la institución.");}location.href=(profile.role==="teacher"||profile.role==="admin"||profile.role==="counselor")?"../pages/teacher-dashboard.html":"../pages/student-dashboard.html"}form?.addEventListener("submit",async e=>{e.preventDefault();status.textContent="Comprobando tus datos…";status.className="form-status";button.disabled=true;try{const {error}=await supabase.auth.signInWithPassword({email:email.value.trim().toLowerCase(),password:password.value});if(error)throw error;await redirectByRole()}catch(err){status.textContent=err.message==="Invalid login credentials"?"Correo o contraseña incorrectos.":(err.message||"No se pudo iniciar sesión.");status.className="form-status error"}finally{button.disabled=false}});
+const form=document.getElementById("login-form");
+const status=document.getElementById("login-status");
+const button=document.getElementById("login-button");
+const email=document.getElementById("email");
+const password=document.getElementById("password");
+
+const DEMO_USERS_KEY="aulacontigo_demo_users";
+
+function getUsers(){
+  try{return JSON.parse(localStorage.getItem(DEMO_USERS_KEY)||"[]");}
+  catch{return [];}
+}
+
+function saveSession(user){
+  localStorage.setItem("aulacontigo_session",JSON.stringify(user));
+}
+
+document.getElementById("toggle-password")?.addEventListener("click",()=>{
+  password.type=password.type==="password"?"text":"password";
+});
+
+form?.addEventListener("submit",e=>{
+  e.preventDefault();
+  status.textContent="Verificando…";
+  status.className="form-status";
+  button.disabled=true;
+
+  const mail=email.value.trim().toLowerCase();
+  const pass=password.value;
+  const users=getUsers();
+  const user=users.find(u=>u.email===mail && u.password===pass);
+
+  setTimeout(()=>{
+    if(!user){
+      status.textContent="Correo o contraseña incorrectos.";
+      status.className="form-status error";
+      button.disabled=false;
+      return;
+    }
+
+    saveSession({
+      email:user.email,
+      full_name:user.full_name,
+      role:user.role||"student"
+    });
+
+    status.textContent="¡Inicio de sesión correcto!";
+    status.className="form-status success";
+
+    location.href=(user.role==="teacher"||user.role==="admin"||user.role==="counselor")
+      ?"../pages/teacher-dashboard.html"
+      :"../pages/student-dashboard.html";
+  },250);
+});
