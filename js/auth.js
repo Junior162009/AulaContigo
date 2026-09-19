@@ -1,0 +1,1 @@
+const form=document.getElementById('login-form');const status=document.getElementById('login-status');if(form){form.addEventListener('submit',e=>{e.preventDefault();status.textContent='La autenticación de Supabase se conectará aquí. No se almacenan contraseñas en el frontend.';});}
