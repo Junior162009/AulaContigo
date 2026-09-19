@@ -1,16 +1,1 @@
-const form=document.getElementById("login-form");
-const status=document.getElementById("login-status");
-const supabase=window.supabaseClient;
-async function redirectByRole(){
- const {data:{user}}=await supabase.auth.getUser();
- if(!user){location.href="../pages/login.html";return;}
- const {data:profile}=await supabase.from("school_profiles").select("role,full_name,active").eq("auth_user_id",user.id).maybeSingle();
- if(!profile?.active){await supabase.auth.signOut();throw new Error("Tu cuenta escolar está inactiva o aún no ha sido configurada.");}
- location.href=(profile.role==="teacher"||profile.role==="admin")?"../pages/teacher-dashboard.html":"../pages/student-dashboard.html";
-}
-if(form)form.addEventListener("submit",async e=>{
- e.preventDefault();status.textContent="Iniciando sesión…";
- const {error}=await supabase.auth.signInWithPassword({email:document.getElementById("email").value.trim(),password:document.getElementById("password").value});
- if(error){status.textContent=error.message||"No se pudo iniciar sesión.";return;}
- try{await redirectByRole();}catch(err){status.textContent=err.message;await supabase.auth.signOut();}
-});
+const form=document.getElementById("login-form"),status=document.getElementById("login-status"),supabase=window.supabaseClient,button=document.getElementById("login-button");const email=document.getElementById("email"),password=document.getElementById("password");document.getElementById("toggle-password")?.addEventListener("click",()=>{password.type=password.type==="password"?"text":"password"});async function redirectByRole(){const {data:{user}}=await supabase.auth.getUser();if(!user)throw new Error("No se encontró una sesión activa.");const {data:profile,error}=await supabase.from("school_profiles").select("role,full_name,active").eq("auth_user_id",user.id).maybeSingle();if(error)throw error;if(!profile){await supabase.auth.signOut();throw new Error("Tu cuenta fue creada, pero todavía no tiene perfil escolar.");}if(!profile.active){await supabase.auth.signOut();throw new Error("Tu cuenta está pendiente de activación por la institución.");}location.href=(profile.role==="teacher"||profile.role==="admin"||profile.role==="counselor")?"../pages/teacher-dashboard.html":"../pages/student-dashboard.html"}form?.addEventListener("submit",async e=>{e.preventDefault();status.textContent="Comprobando tus datos…";status.className="form-status";button.disabled=true;try{const {error}=await supabase.auth.signInWithPassword({email:email.value.trim().toLowerCase(),password:password.value});if(error)throw error;await redirectByRole()}catch(err){status.textContent=err.message==="Invalid login credentials"?"Correo o contraseña incorrectos.":(err.message||"No se pudo iniciar sesión.");status.className="form-status error"}finally{button.disabled=false}});
