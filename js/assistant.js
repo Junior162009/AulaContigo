@@ -4,31 +4,18 @@
 const $=s=>document.querySelector(s);
 const messages=$("#messages"), input=$("#message"), send=$("#send"), composer=$("#composer"), clear=$("#clear"), status=$("#status");
 
-const API="https://text.pollinations.ai/";
-const MODELS=["openai/gpt-5.4-nano","openai"];
-const TIMEOUT=10000;
-const STORE="aulacontigo-history-v5";
-const MAX_HISTORY=4;
-
-const SYSTEM="Eres AulaContigo, un tutor escolar en español para estudiantes de secundaria. Responde de forma clara, natural y útil. Para preguntas sencillas responde directamente. Para ejercicios explica los pasos necesarios. No inventes información.";
+const API="https://xdszveoxdrdnwwzzvkav.supabase.co/functions/v1/aulacontigo-ai";
+const STORE="aulacontigo-history-v6";
+const MAX_HISTORY=6;
 
 let history=[];
-
 try{
   const saved=JSON.parse(localStorage.getItem(STORE)||"[]");
-  if(Array.isArray(saved)) history=saved
-    .filter(m=>(m?.role==="user"||m?.role==="assistant")&&typeof m.content==="string")
-    .slice(-MAX_HISTORY);
+  if(Array.isArray(saved)) history=saved.filter(m=>(m?.role==="user"||m?.role==="assistant")&&typeof m.content==="string").slice(-MAX_HISTORY);
 }catch(e){}
 
-function save(){
-  try{localStorage.setItem(STORE,JSON.stringify(history.slice(-MAX_HISTORY)))}catch(e){}
-}
-
-function statusText(t,c=""){
-  if(status){status.textContent=t;status.className="status"+(c?" "+c:"");}
-}
-
+function save(){try{localStorage.setItem(STORE,JSON.stringify(history.slice(-MAX_HISTORY)))}catch(e){}}
+function statusText(t,c=""){if(status){status.textContent=t;status.className="status"+(c?" "+c:"")}}
 function add(role,text,typing=false){
   const el=document.createElement("div");
   el.className="msg "+role+(typing?" typing":"");
@@ -38,43 +25,59 @@ function add(role,text,typing=false){
   return el;
 }
 
-function makePrompt(question){
-  const context=history.length
-    ? "\nContexto reciente:\n"+history.slice(-MAX_HISTORY)
-      .map(m=>(m.role==="user"?"Alumno: ":"Tutor: ")+m.content).join("\n")
-    : "";
-  return SYSTEM+context+"\n\nPregunta del alumno: "+question+"\nRespuesta:";
-}
-
-function fetchWithTimeout(url){
+async function ask(){
   const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),TIMEOUT);
-  return fetch(url,{
-    method:"GET",
-    headers:{Accept:"text/plain"},
-    cache:"no-store",
-    signal:controller.signal
-  }).finally(()=>clearTimeout(timer));
-}
+  const timer=setTimeout(()=>controller.abort(),20000);
+  try{
+    const response=await fetch(API,{
+      method:"POST",
+      headers:{"Content-Type":"application/json","Accept":"text/event-stream"},
+      body:JSON.stringify({messages:history.slice(-MAX_HISTORY)}),
+      signal:controller.signal
+    });
 
-async function ask(question){
-  const prompt=makePrompt(question);
-
-  for(const model of MODELS){
-    try{
-      const url=API+encodeURIComponent(prompt)+"?model="+encodeURIComponent(model)+"&seed=-1";
-      const response=await fetchWithTimeout(url);
-      const text=await response.text();
-
-      if(response.ok && text.trim()) return text.trim();
-
-      console.warn("AulaContigo HTTP",response.status,text.slice(0,150));
-    }catch(error){
-      console.warn("AulaContigo request",model,error.name);
+    if(!response.ok){
+      let detail="";
+      try{const data=await response.json();detail=data.error||""}catch(e){}
+      throw new Error(detail||"El servidor de IA rechazó la solicitud.");
     }
-  }
+    if(!response.body)throw new Error("El servidor no devolvió streaming.");
 
-  throw new Error("No se pudo obtener respuesta del servidor de IA.");
+    const reader=response.body.getReader();
+    const decoder=new TextDecoder();
+    let buffer="",answer="";
+
+    const bubble=add("assistant","",false);
+    statusText("AulaContigo está respondiendo…","ok");
+
+    while(true){
+      const {value,done}=await reader.read();
+      if(done)break;
+      buffer+=decoder.decode(value,{stream:true});
+
+      const lines=buffer.split("\n");
+      buffer=lines.pop()||"";
+
+      for(const line of lines){
+        const trimmed=line.trim();
+        if(!trimmed.startsWith("data:"))continue;
+        const payload=trimmed.slice(5).trim();
+        if(payload==="[DONE]")continue;
+        try{
+          const chunk=JSON.parse(payload);
+          const piece=chunk?.choices?.[0]?.delta?.content;
+          if(piece){
+            answer+=piece;
+            bubble.textContent=answer;
+            messages.scrollTop=messages.scrollHeight;
+          }
+        }catch(e){}
+      }
+    }
+
+    if(!answer.trim()){bubble.remove();throw new Error("La IA devolvió una respuesta vacía.");}
+    return answer.trim();
+  }finally{clearTimeout(timer)}
 }
 
 async function sendMessage(){
@@ -84,60 +87,37 @@ async function sendMessage(){
   add("user",question);
   history.push({role:"user",content:question});
   save();
-
   input.value="";
   input.style.height="";
   send.disabled=true;
-  statusText("Pensando…");
+  statusText("Conectando con AulaContigo…");
   const thinking=add("assistant","Pensando…",true);
 
   try{
-    const answer=await ask(question);
     thinking.remove();
-    add("assistant",answer);
+    const answer=await ask();
     history.push({role:"assistant",content:answer});
     save();
     statusText("Respuesta recibida.","ok");
   }catch(error){
     thinking.remove();
-    add("assistant","⚠️ No pude conectar con la IA en este momento. Intenta nuevamente.");
-    statusText("Error temporal de conexión.","err");
+    console.error("AulaContigo:",error);
+    add("assistant","⚠️ "+(error.name==="AbortError"?"La respuesta tardó demasiado.":error.message||"No se pudo conectar con la IA.")+"\n\nIntenta nuevamente.");
+    statusText("Error temporal de IA.","err");
   }finally{
     send.disabled=false;
     input.focus();
   }
 }
 
-composer.addEventListener("submit",e=>{
-  e.preventDefault();
-  sendMessage();
-});
-
-input.addEventListener("input",()=>{
-  input.style.height="auto";
-  input.style.height=Math.min(input.scrollHeight,150)+"px";
-});
-
-input.addEventListener("keydown",e=>{
-  if(e.key==="Enter"&&!e.shiftKey){
-    e.preventDefault();
-    sendMessage();
-  }
-});
-
-document.querySelectorAll("[data-q]").forEach(button=>{
-  button.addEventListener("click",()=>{
-    input.value=button.dataset.q||"";
-    sendMessage();
-  });
-});
+composer.addEventListener("submit",e=>{e.preventDefault();sendMessage()});
+input.addEventListener("input",()=>{input.style.height="auto";input.style.height=Math.min(input.scrollHeight,150)+"px"});
+input.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage()}});
+document.querySelectorAll("[data-q]").forEach(b=>b.addEventListener("click",()=>{input.value=b.dataset.q||"";sendMessage()}));
 
 clear.addEventListener("click",()=>{
   history=[];
-  try{
-    localStorage.removeItem(STORE);
-    localStorage.removeItem("aulacontigo-history-v4");
-  }catch(e){}
+  try{localStorage.removeItem(STORE);localStorage.removeItem("aulacontigo-history-v5")}catch(e){}
   messages.innerHTML="";
   add("assistant","¡Nueva conversación! 👋 ¿Qué quieres aprender hoy?");
   statusText("Nueva conversación iniciada.","ok");
@@ -145,7 +125,7 @@ clear.addEventListener("click",()=>{
 });
 
 messages.innerHTML="";
-if(history.length) history.forEach(m=>add(m.role,m.content));
-else add("assistant","¡Hola! 👋 Soy AulaContigo. Escribe una pregunta y te ayudaré paso a paso.");
+if(history.length)history.forEach(m=>add(m.role,m.content));
+else add("assistant","¡Hola! 👋 Soy AulaContigo. Escribe tu pregunta y te responderé rápidamente.");
 statusText("Listo para ayudarte.","ok");
 })();
